@@ -1,0 +1,21 @@
+# IDE
+.idea/
+
+# Python cache
+__pycache__/
+Lib/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments (если создашь)
+venv/
+env/
+
+# Секреты и базы
+Lib/.env
+Lib/*.db
+
+# Служебные файлы
+.DS_Store
+*.log
