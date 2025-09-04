@@ -29,6 +29,9 @@ DB_PATH   = os.getenv("DB_PATH", "bot.db")
 TIMEZONE  = os.getenv("TIMEZONE", "Asia/Tashkent")
 ONEC_SYNC_URL = os.getenv("ONEC_SYNC_URL")
 
+# --- DB tuning (НОВОЕ) ---
+SQLITE_TIMEOUT = int(os.getenv("SQLITE_TIMEOUT", "30"))  # таймаут на блокировки (сек)
+
 # ---------- TIMEZONE HELPERS ----------
 # zoneinfo доступен с Python 3.9; для 3.8 используем pytz
 try:
@@ -143,7 +146,12 @@ def kb_main(is_manager: bool) -> ReplyKeyboardMarkup:
 
 # ---------- БАЗА ДАННЫХ ----------
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    # aiosqlite timeout + режим WAL для надёжности
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA foreign_keys=ON")
+
         # Пользователи
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -186,7 +194,7 @@ async def init_db():
         await db.commit()
 
 async def get_user(tg_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))).fetchone()
         return dict(row) if row else None
@@ -195,7 +203,7 @@ async def upsert_user(
     tg_id: str, passport: str, birthdate: str, full_name: str,
     is_manager: bool = False, supervisor_tg_id: Optional[str] = None
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         await db.execute("""
         INSERT INTO users (tg_id, passport, birthdate, full_name, registered_at, is_manager, supervisor_tg_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -211,13 +219,13 @@ async def upsert_user(
         await db.commit()
 
 async def delete_user(tg_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         await db.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,))
         await db.commit()
 
 async def create_tardy_request(employee_tg_id: str, manager_tg_id: str, reason: str,
                                start_hm: Optional[str], end_hm: Optional[str]) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         cur = await db.execute("""
         INSERT INTO tardy_requests (employee_tg_id, manager_tg_id, reason, start_time, end_time, submitted_at, status)
         VALUES (?, ?, ?, ?, ?, ?, 'pending')
@@ -226,16 +234,15 @@ async def create_tardy_request(employee_tg_id: str, manager_tg_id: str, reason: 
         return cur.lastrowid
 
 async def set_user_supervisor(tg_id: str, supervisor_tg_id: Optional[str]):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         await db.execute(
             "UPDATE users SET supervisor_tg_id = ? WHERE tg_id = ?",
             (supervisor_tg_id, tg_id)
         )
         await db.commit()
 
-
 async def get_pending_tardy_for_manager(manager_tg_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("""
             SELECT * FROM tardy_requests
@@ -245,13 +252,13 @@ async def get_pending_tardy_for_manager(manager_tg_id: str):
         return [dict(r) for r in rows]
 
 async def get_tardy(req_id: int) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT * FROM tardy_requests WHERE id = ?", (req_id,))).fetchone()
         return dict(row) if row else None
 
 async def set_tardy_status(req_id: int, status: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_TIMEOUT) as db:
         await db.execute("UPDATE tardy_requests SET status = ? WHERE id = ?", (status, req_id))
         await db.commit()
 
@@ -416,8 +423,6 @@ async def sync_with_1c(message: Message):
             await message.answer("⚠️ 1С не вернула корректный ID руководителя.")
     except Exception as e:
         await message.answer(f"⚠️ Ошибка синхронизации: {e}")
-
-
 
 @dp.message(Command("whoami"))
 async def whoami(message: Message):
@@ -659,6 +664,11 @@ async def tardy_reject(cb: CallbackQuery):
 
 # ---------- MAIN ----------
 async def main():
+    # (НОВОЕ) гарантируем, что каталог под DB существует (например, /data при Volume)
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
     await init_db()
     await dp.start_polling(bot)
 
